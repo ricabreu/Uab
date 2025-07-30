@@ -1,0 +1,187 @@
+# =============================================================================
+# SCRIPT DE ANÁLISE SIMPLIFICADO (OBJETIVO 3: COINTEGRAÇÃO E CAUSALIDADE)
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# PASSO 1: CONFIGURAÇÃO E CARREGAMENTO DOS PACOTES
+# -----------------------------------------------------------------------------
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("lubridate")) install.packages("lubridate")
+if (!require("xts")) install.packages("xts")
+if (!require("vars")) install.packages("vars")
+
+# Carregar pacotes
+library(tidyverse)
+library(lubridate)
+library(xts)
+library(vars)
+
+
+# -----------------------------------------------------------------------------
+# PASSO 2: PREPARAÇÃO DOS DADOS
+# (Necessário para ter as séries de preços e retornos prontas)
+# -----------------------------------------------------------------------------
+# Carregar e preparar os dados para o par ETH vs. MATIC
+file_path <- "Price_ETH_MATIC_OP.csv"
+all_data_raw <- read.csv2(file_path)
+
+all_data <- all_data_raw %>%
+  mutate(Date = dmy(Date)) %>%
+  rename(Price_ETH = ETH_price, Price_MATIC = Matic_price) %>%
+  mutate(across(c(Price_ETH, Price_MATIC), as.numeric)) %>%
+  arrange(Date) %>%
+  dplyr::select(Date, Price_ETH, Price_MATIC)
+
+# Criar objetos de séries temporais
+prices_xts <- xts(all_data[, -1], order.by = all_data$Date)
+prices_xts <- na.omit(prices_xts)
+log_prices <- log(prices_xts)
+log_returns <- diff(log_prices)
+log_returns <- na.omit(log_returns)
+
+
+# -----------------------------------------------------------------------------
+# PASSO 3: ANÁLISE DE COINTEGRAÇÃO
+# -----------------------------------------------------------------------------
+print("--- 1. ANÁLISE DE COINTEGRAÇÃO (RELAÇÃO DE LONGO PRAZO) ---")
+
+# Selecionar o número de desfasamentos (lags) para o teste
+lag_selection_coint <- VARselect(log_prices, lag.max = 10, type = "const")
+k_lags_coint <- lag_selection_coint$selection["AIC(n)"]
+
+# Executar o teste de Johansen
+johansen_test <- ca.jo(log_prices, type = "trace", ecdet = "const", K = k_lags_coint)
+
+# Apresentar o sumário do teste
+print(summary(johansen_test))
+
+
+# -----------------------------------------------------------------------------
+# PASSO 4: ANÁLISE DE CAUSALIDADE DE GRANGER
+# -----------------------------------------------------------------------------
+print("--- 2. ANÁLISE DE CAUSALIDADE (RELAÇÃO DE CURTO PRAZO) ---")
+
+# Decidir qual o modelo a usar com base no teste de cointegração
+test_stat_r0 <- johansen_test@teststat[2]
+crit_val_r0 <- johansen_test@cval[2, 2]
+
+if (test_stat_r0 > crit_val_r0) {
+  # CASO 1: Existe cointegração. Usamos o modelo VECM.
+  print("Foi detetada cointegração. A causalidade será testada no quadro VECM.")
+  
+  final_model <- vec2var(johansen_test, r = 1) # Assumindo r=1
+  
+} else {
+  # CASO 2: Não existe cointegração. Usamos o modelo VAR nos retornos.
+  print("Não foi detetada cointegração. A causalidade será testada no quadro VAR nos retornos.")
+  
+  lag_selection_var <- VARselect(log_returns, lag.max = 10, type = "const")
+  k_lags_var <- lag_selection_var$selection["AIC(n)"]
+  final_model <- VAR(log_returns, p = k_lags_var, type = "const")
+}
+
+# Executar e apresentar os testes de causalidade no modelo escolhido
+print("Teste de Causalidade de ETH (L1) para MATIC (L2):")
+print(causality(final_model, cause = "Price_ETH"))
+
+print("Teste de Causalidade de MATIC (L2) para ETH (L1):")
+print(causality(final_model, cause = "Price_MATIC"))
+
+
+# =============================================================================
+# SCRIPT DE ANÁLISE (OBJETIVO 3: COINTEGRAÇÃO E CAUSALIDADE - ETH vs. OP)
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# PASSO 1: CONFIGURAÇÃO E CARREGAMENTO DOS PACOTES
+# -----------------------------------------------------------------------------
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("lubridate")) install.packages("lubridate")
+if (!require("xts")) install.packages("xts")
+if (!require("vars")) install.packages("vars")
+
+# Carregar pacotes
+library(tidyverse)
+library(lubridate)
+library(xts)
+library(vars)
+
+
+# -----------------------------------------------------------------------------
+# PASSO 2: PREPARAÇÃO DOS DADOS PARA O PAR ETH vs. OP
+# -----------------------------------------------------------------------------
+# Carregar os dados
+file_path <- "Price_ETH_MATIC_OP.csv"
+all_data_raw <- read.csv2(file_path)
+
+# --- ALTERAÇÃO PRINCIPAL AQUI ---
+# Selecionar e preparar os dados especificamente para ETH e OP
+all_data_eth_op <- all_data_raw %>%
+  mutate(Date = dmy(Date)) %>%
+  # Renomear colunas para L1 e L2 para manter o resto do código consistente
+  rename(
+    L1_Price = ETH_price,
+    L2_Price = OP_price # <-- MUDANÇA: Usar OP_price em vez de Matic_price
+  ) %>%
+  mutate(across(c(L1_Price, L2_Price), as.numeric)) %>%
+  arrange(Date) %>%
+  dplyr::select(Date, L1_Price, L2_Price)
+
+
+# Criar objetos de séries temporais
+prices_xts <- xts(all_data_eth_op[, -1], order.by = all_data_eth_op$Date)
+prices_xts <- na.omit(prices_xts)
+log_prices <- log(prices_xts)
+log_returns <- diff(log_prices)
+log_returns <- na.omit(log_returns)
+
+
+# -----------------------------------------------------------------------------
+# PASSO 3: ANÁLISE DE COINTEGRAÇÃO
+# -----------------------------------------------------------------------------
+print("--- 1. ANÁLISE DE COINTEGRAÇÃO (RELAÇÃO DE LONGO PRAZO) ---")
+
+# Selecionar o número de desfasamentos (lags) para o teste
+lag_selection_coint <- VARselect(log_prices, lag.max = 10, type = "const")
+k_lags_coint <- lag_selection_coint$selection["AIC(n)"]
+
+# Executar o teste de Johansen
+johansen_test <- ca.jo(log_prices, type = "trace", ecdet = "const", K = k_lags_coint)
+
+# Apresentar o sumário do teste
+print(summary(johansen_test))
+
+
+# -----------------------------------------------------------------------------
+# PASSO 4: ANÁLISE DE CAUSALIDADE DE GRANGER
+# -----------------------------------------------------------------------------
+print("--- 2. ANÁLISE DE CAUSALIDADE (RELAÇÃO DE CURTO PRAZO) ---")
+
+# Decidir qual o modelo a usar com base no teste de cointegração
+test_stat_r0 <- johansen_test@teststat[2]
+crit_val_r0 <- johansen_test@cval[2, 2]
+
+if (test_stat_r0 > crit_val_r0) {
+  # CASO 1: Existe cointegração. Usamos o modelo VECM.
+  print("Foi detetada cointegração. A causalidade será testada no quadro VECM.")
+  
+  final_model <- vec2var(johansen_test, r = 1) # Assumindo r=1
+  
+} else {
+  # CASO 2: Não existe cointegração. Usamos o modelo VAR nos retornos.
+  print("Não foi detetada cointegração. A causalidade será testada no quadro VAR nos retornos.")
+  
+  lag_selection_var <- VARselect(log_returns, lag.max = 10, type = "const")
+  k_lags_var <- lag_selection_var$selection["AIC(n)"]
+  final_model <- VAR(log_returns, p = k_lags_var, type = "const")
+}
+
+# Executar e apresentar os testes de causalidade no modelo escolhido
+# Nota: Os nomes das colunas no output serão L1_Price e L2_Price
+print("Teste de Causalidade de ETH (L1) para OP (L2):")
+print(causality(final_model, cause = "L1_Price"))
+
+print("Teste de Causalidade de OP (L2) para ETH (L1):")
+print(causality(final_model, cause = "L2_Price"))

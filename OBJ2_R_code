@@ -1,0 +1,345 @@
+# =============================================================================
+# SCRIPT DE ANÁLISE SIMPLIFICADO (OBJETIVO 2: VOLATILIDADE E SPILLOVERS)
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# PASSO 1: CONFIGURAÇÃO E CARREGAMENTO DOS PACOTES
+# -----------------------------------------------------------------------------
+# O pacote 'FinTS' é necessário para o Teste ARCH
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("lubridate")) install.packages("lubridate")
+if (!require("xts")) install.packages("xts")
+if (!require("vars")) install.packages("vars")
+if (!require("rmgarch")) install.packages("rmgarch")
+if (!require("FinTS")) install.packages("FinTS")
+
+
+# Carregar pacotes
+library(tidyverse)
+library(lubridate)
+library(xts)
+library(vars)
+library(rmgarch)
+library(FinTS)
+
+
+# -----------------------------------------------------------------------------
+# PASSO 2: PREPARAÇÃO DOS DADOS
+# (Necessário para obter os resíduos para a análise de volatilidade)
+# -----------------------------------------------------------------------------
+# Carregar e preparar os dados
+file_path <- "Price_ETH_MATIC_OP.csv"
+all_data_raw <- read.csv2(file_path)
+
+all_data <- all_data_raw %>%
+  mutate(Date = dmy(Date)) %>%
+  rename(Price_ETH = ETH_price, Price_MATIC = Matic_price) %>%
+  mutate(across(c(Price_ETH, Price_MATIC), as.numeric)) %>%
+  arrange(Date) %>%
+  dplyr::select(Date, Price_ETH, Price_MATIC)
+
+# Criar objetos de séries temporais
+prices_xts <- xts(all_data[, -1], order.by = all_data$Date)
+prices_xts <- na.omit(prices_xts)
+log_returns <- diff(log(prices_xts))
+log_returns <- na.omit(log_returns)
+
+# Estimar o modelo VAR nos retornos para obter os resíduos
+# (Assumimos, com base na análise anterior, que o modelo VAR é o correto)
+lag_selection_var <- VARselect(log_returns, lag.max = 10, type = "const")
+k_lags_var <- lag_selection_var$selection["AIC(n)"]
+var_model <- VAR(log_returns, p = k_lags_var, type = "const")
+
+# Extrair os resíduos do modelo VAR - este é o ponto de partida para o Objetivo 2
+residuals_var <- residuals(var_model)
+
+
+# -----------------------------------------------------------------------------
+# PASSO 3: ANÁLISE DE VOLATILIDADE (OBJETIVO 2)
+# -----------------------------------------------------------------------------
+print("--- ANÁLISE DE VOLATILIDADE (OBJETIVO 2) ---")
+
+# 3.1 Testar a presença de efeitos ARCH (agrupamento de volatilidade)
+# A hipótese nula (H0) é que não há efeitos ARCH. Um p-valor baixo (< 0.05)
+# sugere que um modelo GARCH é apropriado.
+print("Teste ARCH para os resíduos do ETH (L1):")
+print(ArchTest(residuals_var[, "Price_ETH"], lags = 10))
+
+print("Teste ARCH para os resíduos do MATIC (L2):")
+print(ArchTest(residuals_var[, "Price_MATIC"], lags = 10))
+
+
+# 3.2 Especificar e estimar um modelo DCC-GARCH
+# Este modelo permite que a correlação entre os ativos mude ao longo do tempo.
+
+# Primeiro, define-se a especificação para cada série individual (GARCH(1,1))
+spec_garch_uni <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  mean.model = list(armaOrder = c(0, 0), include.mean = FALSE) # A média já foi tratada pelo VAR
+)
+
+# Segundo, define-se a especificação do modelo multivariado DCC
+spec_dcc <- dccspec(
+  uspec = multispec(replicate(2, spec_garch_uni)), # Aplicar a spec GARCH a 2 séries
+  dccOrder = c(1, 1),
+  distribution = "mvnorm" # Assumir distribuição normal multivariada
+)
+
+# Estimar o modelo. Nota: este passo pode ser computacionalmente intensivo.
+dcc_fit <- dccfit(spec_dcc, data = residuals_var)
+
+# Apresentar um sumário dos coeficientes do modelo
+print("Sumário do Modelo DCC-GARCH:")
+print(dcc_fit)
+
+
+# -----------------------------------------------------------------------------
+# PASSO 4: VISUALIZAÇÃO DOS RESULTADOS DE VOLATILIDADE
+# -----------------------------------------------------------------------------
+
+# --- GRÁFICO 1: CORRELAÇÃO CONDICIONAL DINÂMICA (DCC)
+
+# 1. OBTER O VETOR DE DATAS CORRETO
+# As datas dos resíduos correspondem às datas dos retornos, excluindo
+# as primeiras observações usadas para os lags do modelo.
+datas_corretas <- index(log_returns)[(k_lags_var + 1):length(index(log_returns))]
+
+# 2. Criar o data frame para o gráfico usando as datas corretas
+dcc_cor_values <- rcor(dcc_fit)[1, 2, ]
+cor_data <- data.frame(
+  Date = datas_corretas, # <-- CORREÇÃO APLICADA AQUI
+  Correlation = dcc_cor_values
+)
+
+# 3. Criar o gráfico com ggplot2 (este código permanece igual)
+ggplot(cor_data, aes(x = Date, y = Correlation)) +
+  geom_line(color = "darkblue", linewidth = 1) +
+  scale_x_date(
+    date_breaks = "6 months",
+    date_labels = "%b %Y"
+  ) +
+  labs(
+    title = "Correlação Condicional Dinâmica (DCC) entre ETH e MATIC",
+    y = "Correlação Condicional",
+    x = "Data"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# --- GRÁFICO 2: VOLATILIDADES CONDICIONAIS INDIVIDUAIS ---
+
+
+# 1. Usar o mesmo vetor de datas corretas que criámos acima
+#    (Não precisa de o criar novamente se já o fez)
+datas_corretas <- index(log_returns)[(k_lags_var + 1):length(index(log_returns))]
+
+# 2. Extrair as volatilidades e criar o data frame para o gráfico
+mfit <- dcc_fit@mfit
+H_array <- mfit$H
+vol_eth <- sqrt(H_array[1, 1, ])
+vol_matic <- sqrt(H_array[2, 2, ])
+
+vol_data <- data.frame(
+  Date = datas_corretas, # <-- CORREÇÃO APLICADA AQUI
+  Volatilidade_ETH = vol_eth,
+  Volatilidade_MATIC = vol_matic
+)
+
+vol_data_long <- vol_data %>%
+  pivot_longer(
+    cols = c("Volatilidade_ETH", "Volatilidade_MATIC"),
+    names_to = "Ativo",
+    values_to = "Volatilidade"
+  )
+
+# 3. Criar o gráfico com ggplot2 (este código permanece igual)
+ggplot(vol_data_long, aes(x = Date, y = Volatilidade, color = Ativo)) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = c("Volatilidade_ETH" = "black", "Volatilidade_MATIC" = "red")) +
+  scale_x_date(
+    date_breaks = "6 months",
+    date_labels = "%b %Y"
+  ) +
+  labs(
+    title = "Volatilidades Condicionais Individuais",
+    y = "Volatilidade (Desvio-Padrão Condicional)",
+    x = "Data",
+    color = "Ativo"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top", axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+  # =============================================================================
+# SCRIPT DE ANÁLISE SIMPLIFICADO (OBJETIVO 2: VOLATILIDADE E SPILLOVERS)
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# PASSO 1: CONFIGURAÇÃO E CARREGAMENTO DOS PACOTES
+# -----------------------------------------------------------------------------
+# O pacote 'FinTS' é necessário para o Teste ARCH
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("lubridate")) install.packages("lubridate")
+if (!require("xts")) install.packages("xts")
+if (!require("vars")) install.packages("vars")
+if (!require("rmgarch")) install.packages("rmgarch")
+if (!require("FinTS")) install.packages("FinTS")
+
+
+# Carregar pacotes
+library(tidyverse)
+library(lubridate)
+library(xts)
+library(vars)
+library(rmgarch)
+library(FinTS)
+
+
+# -----------------------------------------------------------------------------
+# PASSO 2: PREPARAÇÃO DOS DADOS
+# (Necessário para obter os resíduos para a análise de volatilidade)
+# -----------------------------------------------------------------------------
+# Carregar e preparar os dados
+file_path <- "Price_ETH_MATIC_OP.csv"
+all_data_raw <- read.csv2(file_path)
+
+all_data <- all_data_raw %>%
+  mutate(Date = dmy(Date)) %>%
+  rename(Price_ETH = ETH_price, Price_OP = OP_price) %>%
+  mutate(across(c(Price_ETH, Price_OP), as.numeric)) %>%
+  arrange(Date) %>%
+  dplyr::select(Date, Price_ETH, Price_OP)
+
+# Criar objetos de séries temporais
+prices_xts <- xts(all_data[, -1], order.by = all_data$Date)
+prices_xts <- na.omit(prices_xts)
+log_returns <- diff(log(prices_xts))
+log_returns <- na.omit(log_returns)
+
+# Estimar o modelo VAR nos retornos para obter os resíduos
+# (Assumimos, com base na análise anterior, que o modelo VAR é o correto)
+lag_selection_var <- VARselect(log_returns, lag.max = 10, type = "const")
+k_lags_var <- lag_selection_var$selection["AIC(n)"]
+var_model <- VAR(log_returns, p = k_lags_var, type = "const")
+
+# Extrair os resíduos do modelo VAR - este é o ponto de partida para o Objetivo 2
+residuals_var <- residuals(var_model)
+
+
+# -----------------------------------------------------------------------------
+# PASSO 3: ANÁLISE DE VOLATILIDADE (OBJETIVO 2)
+# -----------------------------------------------------------------------------
+print("--- ANÁLISE DE VOLATILIDADE (OBJETIVO 2) ---")
+
+# 3.1 Testar a presença de efeitos ARCH (agrupamento de volatilidade)
+# A hipótese nula (H0) é que não há efeitos ARCH. Um p-valor baixo (< 0.05)
+# sugere que um modelo GARCH é apropriado.
+print("Teste ARCH para os resíduos do ETH (L1):")
+print(ArchTest(residuals_var[, "Price_ETH"], lags = 10))
+
+print("Teste ARCH para os resíduos do OP (L2):")
+print(ArchTest(residuals_var[, "Price_OP"], lags = 10))
+
+
+# 3.2 Especificar e estimar um modelo DCC-GARCH
+# Este modelo permite que a correlação entre os ativos mude ao longo do tempo.
+
+# Primeiro, define-se a especificação para cada série individual (GARCH(1,1))
+spec_garch_uni <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  mean.model = list(armaOrder = c(0, 0), include.mean = FALSE) # A média já foi tratada pelo VAR
+)
+
+# Segundo, define-se a especificação do modelo multivariado DCC
+spec_dcc <- dccspec(
+  uspec = multispec(replicate(2, spec_garch_uni)), # Aplicar a spec GARCH a 2 séries
+  dccOrder = c(1, 1),
+  distribution = "mvnorm" # Assumir distribuição normal multivariada
+)
+
+# Estimar o modelo. Nota: este passo pode ser computacionalmente intensivo.
+dcc_fit <- dccfit(spec_dcc, data = residuals_var)
+
+# Apresentar um sumário dos coeficientes do modelo
+print("Sumário do Modelo DCC-GARCH:")
+print(dcc_fit)
+
+
+# -----------------------------------------------------------------------------
+# PASSO 4: VISUALIZAÇÃO DOS RESULTADOS DE VOLATILIDADE
+# -----------------------------------------------------------------------------
+
+# --- GRÁFICO 1: CORRELAÇÃO CONDICIONAL DINÂMICA (DCC)
+
+# 1. OBTER O VETOR DE DATAS CORRETO
+# As datas dos resíduos correspondem às datas dos retornos, excluindo
+# as primeiras observações usadas para os lags do modelo.
+datas_corretas <- index(log_returns)[(k_lags_var + 1):length(index(log_returns))]
+
+# 2. Criar o data frame para o gráfico usando as datas corretas
+dcc_cor_values <- rcor(dcc_fit)[1, 2, ]
+cor_data <- data.frame(
+  Date = datas_corretas, 
+  Correlation = dcc_cor_values
+)
+
+# 3. Criar o gráfico com ggplot2 (este código permanece igual)
+ggplot(cor_data, aes(x = Date, y = Correlation)) +
+  geom_line(color = "darkgreen", linewidth = 1) +
+  scale_x_date(
+    date_breaks = "6 months",
+    date_labels = "%b %Y"
+  ) +
+  labs(
+    title = "Correlação Condicional Dinâmica (DCC) entre ETH e OP",
+    y = "Correlação Condicional",
+    x = "Data"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# --- GRÁFICO 2: VOLATILIDADES CONDICIONAIS INDIVIDUAIS ---
+
+
+# 1. Usar o mesmo vetor de datas corretas que criámos acima
+#    (Não precisa de o criar novamente se já o fez)
+datas_corretas <- index(log_returns)[(k_lags_var + 1):length(index(log_returns))]
+
+# 2. Extrair as volatilidades e criar o data frame para o gráfico
+mfit <- dcc_fit@mfit
+H_array <- mfit$H
+vol_eth <- sqrt(H_array[1, 1, ])
+vol_op <- sqrt(H_array[2, 2, ])
+
+vol_data <- data.frame(
+  Date = datas_corretas, # <-- CORREÇÃO APLICADA AQUI
+  Volatilidade_ETH = vol_eth,
+  Volatilidade_OP = vol_op
+)
+
+vol_data_long <- vol_data %>%
+  pivot_longer(
+    cols = c("Volatilidade_ETH", "Volatilidade_OP"),
+    names_to = "Ativo",
+    values_to = "Volatilidade"
+  )
+
+# 3. Criar o gráfico com ggplot2 (este código permanece igual)
+ggplot(vol_data_long, aes(x = Date, y = Volatilidade, color = Ativo)) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = c("Volatilidade_ETH" = "black", "Volatilidade_OP" = "purple")) +
+  scale_x_date(
+    date_breaks = "6 months",
+    date_labels = "%b %Y"
+  ) +
+  labs(
+    title = "Volatilidades Condicionais Individuais",
+    y = "Volatilidade (Desvio-Padrão Condicional)",
+    x = "Data",
+    color = "Ativo"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top", axis.text.x = element_text(angle = 45, hjust = 1))

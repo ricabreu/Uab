@@ -1,0 +1,283 @@
+# =============================================================================
+# SCRIPT DE ANÁLISE COMPLETO (OBJETIVO 1: ETH vs. MATIC)
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# PASSO 1: CONFIGURAÇÃO E CARREGAMENTO DOS PACOTES
+# -----------------------------------------------------------------------------
+# Instalar pacotes necessários, se ainda não os tiver
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("lubridate")) install.packages("lubridate")
+if (!require("xts")) install.packages("xts")
+if (!require("vars")) install.packages("vars")
+
+# Carregar pacotes
+library(tidyverse)
+library(lubridate)
+library(xts)
+library(vars)
+
+
+# -----------------------------------------------------------------------------
+# PASSO 2: CARREGAMENTO E PREPARAÇÃO DOS DADOS
+# -----------------------------------------------------------------------------
+# Definir o caminho para o ficheiro de dados
+file_path <- "Price_ETH_MATIC_OP.csv"
+
+# Ler o ficheiro CSV que usa ponto-e-vírgula (;) como separador
+all_data_raw <- read.csv2(file_path)
+
+# Processo completo de preparação e limpeza dos dados
+all_data <- all_data_raw %>%
+  # Converter a coluna de data usando o formato "DD/MM/YYYY"
+  mutate(Date = dmy(Date)) %>%
+  # Renomear colunas para consistência
+  rename(
+    Price_ETH = ETH_price,
+    Price_MATIC = Matic_price
+  ) %>%
+  # Garantir que as colunas de preço são numéricas
+  mutate(across(c(Price_ETH, Price_MATIC), as.numeric)) %>%
+  # Ordenar por data
+  arrange(Date) %>%
+  # Usar dplyr::select para evitar conflito com outros pacotes
+  dplyr::select(Date, Price_ETH, Price_MATIC)
+
+# Criar objetos de séries temporais (xts)
+prices_xts <- xts(all_data[, -1], order.by = all_data$Date)
+prices_xts <- na.omit(prices_xts)
+
+# Criar séries de log-preços e log-retornos para a análise
+log_prices <- log(prices_xts)
+log_returns <- diff(log_prices)
+log_returns <- na.omit(log_returns)
+
+
+# -----------------------------------------------------------------------------
+# PASSO 3: TESTE DE COINTEGRAÇÃO PARA DECIDIR O MODELO
+# -----------------------------------------------------------------------------
+# Selecionar o número de desfasamentos (lags) para o teste
+lag_selection_coint <- VARselect(log_prices, lag.max = 10, type = "const")
+k_lags_coint <- lag_selection_coint$selection["AIC(n)"]
+
+# Executar o teste de Johansen
+johansen_test <- ca.jo(log_prices, type = "trace", ecdet = "const", K = k_lags_coint)
+
+# Imprimir o sumário do teste de cointegração
+print("--- 1. RESULTADOS DO TESTE DE COINTEGRAÇÃO ---")
+print(summary(johansen_test))
+
+# Determinar automaticamente se há cointegração (r > 0)
+test_stat_r0 <- johansen_test@teststat[2] # Estatística para H0: r=0
+crit_val_r0 <- johansen_test@cval[2, 2]  # Valor crítico a 5%
+
+if (test_stat_r0 > crit_val_r0) {
+  model_type <- "VECM"
+} else {
+  model_type <- "VAR"
+}
+
+
+# -----------------------------------------------------------------------------
+# PASSO 4: ANÁLISE CONDICIONAL E APRESENTAÇÃO DOS RESULTADOS
+# -----------------------------------------------------------------------------
+# Este bloco executa o modelo apropriado (VECM ou VAR) com base no teste anterior
+
+if (model_type == "VECM") {
+  
+  # --- BLOCO DE CÓDIGO PARA O VECM ---
+  
+  print("--- 2. ANÁLISE VECM (Foi detetada cointegração) ---")
+  
+  # Estimar o modelo e guardar
+  final_model <- vec2var(johansen_test, r = 1) # Assumindo r=1
+  
+  # Apresentar o sumário completo do modelo
+  print("Sumário do Modelo VECM (representado como VAR):")
+  print(summary(final_model))
+  
+  # Apresentar os testes de causalidade
+  print("Teste de Causalidade de Granger (no VECM):")
+  print(causality(final_model, cause = "Price_ETH"))
+  print(causality(final_model, cause = "Price_MATIC"))
+  
+} else {
+  
+  # --- BLOCO DE CÓDIGO PARA O VAR ---
+  
+  print("--- 2. ANÁLISE VAR (Não foi detetada cointegração) ---")
+  
+  # Selecionar os lags para o modelo VAR nos retornos
+  lag_selection_var <- VARselect(log_returns, lag.max = 10, type = "const")
+  k_lags_var <- lag_selection_var$selection["AIC(n)"]
+  
+  # Estimar o modelo e guardar
+  final_model <- VAR(log_returns, p = k_lags_var, type = "const")
+  
+  # Apresentar o sumário completo do modelo
+  print("Sumário do Modelo VAR:")
+  print(summary(final_model))
+  
+  # Apresentar os testes de causalidade
+  print("Teste de Causalidade de Granger (no VAR):")
+  print(causality(final_model, cause = "Price_ETH"))
+  print(causality(final_model, cause = "Price_MATIC"))
+}
+
+# -----------------------------------------------------------------------------
+# PASSO 5: GERAÇÃO DOS GRÁFICOS DE ANÁLISE DINÂMICA
+# -----------------------------------------------------------------------------
+# Estes gráficos serão mostrados na janela de Plots do RStudio
+
+# Gráfico da Função de Resposta ao Impulso (IRF)
+print("--- 3. GRÁFICOS (ver na janela de Plots) ---")
+plot(irf(final_model, impulse = "Price_ETH", response = "Price_MATIC", n.ahead = 20, boot = TRUE), main="Resposta do MATIC a um Choque no ETH")
+
+# Gráfico da Decomposição da Variância do Erro (FEVD)
+plot(fevd(final_model, n.ahead = 20), main="Decomposição da Variância do Erro")
+
+plot(fevd(final_model, n.ahead = 20), main="Decomposição da Variância do Erro")
+
+
+
+# =============================================================================
+# SCRIPT DE ANÁLISE COMPLETO (OBJETIVO 1: ETH vs. OP)
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# PASSO 1: CONFIGURAÇÃO E CARREGAMENTO DOS PACOTES
+# -----------------------------------------------------------------------------
+# Instalar pacotes necessários, se ainda não os tiver
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("lubridate")) install.packages("lubridate")
+if (!require("xts")) install.packages("xts")
+if (!require("vars")) install.packages("vars")
+
+# Carregar pacotes
+library(tidyverse)
+library(lubridate)
+library(xts)
+library(vars)
+
+
+# -----------------------------------------------------------------------------
+# PASSO 2: CARREGAMENTO E PREPARAÇÃO DOS DADOS
+# -----------------------------------------------------------------------------
+# Definir o caminho para o ficheiro de dados
+file_path <- "Price_ETH_MATIC_OP.csv"
+
+# Ler o ficheiro CSV que usa ponto-e-vírgula (;) como separador
+all_data_raw <- read.csv2(file_path)
+
+# Processo completo de preparação e limpeza dos dados
+all_data <- all_data_raw %>%
+  # Converter a coluna de data usando o formato "DD/MM/YYYY"
+  mutate(Date = dmy(Date)) %>%
+  # Renomear colunas para consistência
+  rename(
+    Price_ETH = ETH_price,
+    Price_OP = OP_price
+  ) %>%
+  # Garantir que as colunas de preço são numéricas
+  mutate(across(c(Price_ETH, Price_OP), as.numeric)) %>%
+  # Ordenar por data
+  arrange(Date) %>%
+  # Usar dplyr::select para evitar conflito com outros pacotes
+  dplyr::select(Date, Price_ETH, Price_OP)
+
+# Criar objetos de séries temporais (xts)
+prices_xts <- xts(all_data[, -1], order.by = all_data$Date)
+prices_xts <- na.omit(prices_xts)
+
+# Criar séries de log-preços e log-retornos para a análise
+log_prices <- log(prices_xts)
+log_returns <- diff(log_prices)
+log_returns <- na.omit(log_returns)
+
+
+# -----------------------------------------------------------------------------
+# PASSO 3: TESTE DE COINTEGRAÇÃO PARA DECIDIR O MODELO
+# -----------------------------------------------------------------------------
+# Selecionar o número de desfasamentos (lags) para o teste
+lag_selection_coint <- VARselect(log_prices, lag.max = 10, type = "const")
+k_lags_coint <- lag_selection_coint$selection["AIC(n)"]
+
+# Executar o teste de Johansen
+johansen_test <- ca.jo(log_prices, type = "trace", ecdet = "const", K = k_lags_coint)
+
+# Imprimir o sumário do teste de cointegração
+print("--- 1. RESULTADOS DO TESTE DE COINTEGRAÇÃO ---")
+print(summary(johansen_test))
+
+# Determinar automaticamente se há cointegração (r > 0)
+test_stat_r0 <- johansen_test@teststat[2] # Estatística para H0: r=0
+crit_val_r0 <- johansen_test@cval[2, 2]  # Valor crítico a 5%
+
+if (test_stat_r0 > crit_val_r0) {
+  model_type <- "VECM"
+} else {
+  model_type <- "VAR"
+}
+
+
+# -----------------------------------------------------------------------------
+# PASSO 4: ANÁLISE CONDICIONAL E APRESENTAÇÃO DOS RESULTADOS
+# -----------------------------------------------------------------------------
+# Este bloco executa o modelo apropriado (VECM ou VAR) com base no teste anterior
+
+if (model_type == "VECM") {
+  
+  # --- BLOCO DE CÓDIGO PARA O VECM ---
+  
+  print("--- 2. ANÁLISE VECM (Foi detetada cointegração) ---")
+  
+  # Estimar o modelo e guardar
+  final_model <- vec2var(johansen_test, r = 1) # Assumindo r=1
+  
+  # Apresentar o sumário completo do modelo
+  print("Sumário do Modelo VECM (representado como VAR):")
+  print(summary(final_model))
+  
+  # Apresentar os testes de causalidade
+  print("Teste de Causalidade de Granger (no VECM):")
+  print(causality(final_model, cause = "Price_ETH"))
+  print(causality(final_model, cause = "Price_MATIC"))
+  
+} else {
+  
+  # --- BLOCO DE CÓDIGO PARA O VAR ---
+  
+  print("--- 2. ANÁLISE VAR (Não foi detetada cointegração) ---")
+  
+  # Selecionar os lags para o modelo VAR nos retornos
+  lag_selection_var <- VARselect(log_returns, lag.max = 10, type = "const")
+  k_lags_var <- lag_selection_var$selection["AIC(n)"]
+  
+  # Estimar o modelo e guardar
+  final_model <- VAR(log_returns, p = k_lags_var, type = "const")
+  
+  # Apresentar o sumário completo do modelo
+  print("Sumário do Modelo VAR:")
+  print(summary(final_model))
+  
+  # Apresentar os testes de causalidade
+  print("Teste de Causalidade de Granger (no VAR):")
+  print(causality(final_model, cause = "Price_ETH"))
+  print(causality(final_model, cause = "Price_OP"))
+}
+
+# -----------------------------------------------------------------------------
+# PASSO 5: GERAÇÃO DOS GRÁFICOS DE ANÁLISE DINÂMICA
+# -----------------------------------------------------------------------------
+# Estes gráficos serão mostrados na janela de Plots do RStudio
+
+# Gráfico da Função de Resposta ao Impulso (IRF)
+print("--- 3. GRÁFICOS (ver na janela de Plots) ---")
+plot(irf(final_model, impulse = "Price_ETH", response = "Price_OP", n.ahead = 20, boot = TRUE), main="Resposta do MATIC a um Choque no ETH")
+
+# Gráfico da Decomposição da Variância do Erro (FEVD)
+plot(fevd(final_model, n.ahead = 20), main="Decomposição da Variância do Erro")
+
+plot(fevd(final_model, n.ahead = 20), main="Decomposição da Variância do Erro")
